@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import re
+import datetime
 
 # ==========================================
 # 0. 容器环境优化
@@ -123,25 +124,68 @@ except Exception as e:
 # ==========================================
 # 4. 推理与后处理逻辑
 # ==========================================
+# 日期短语正则：10月25号 / 2026-10-25 / 10月25日 / 25号
+DATE_RE = re.compile(
+    r'\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}\s*[号日]?'
+    r'|\d{1,4}\s*月\s*\d{1,2}\s*[号日]?'
+    r'|\d{1,2}\s*[号日]'
+)
+
+def extract_date(text: str):
+    """从原文解析记账日期，返回 YYYY-MM-DD；无法识别时返回 None（前端兜底今天）"""
+    today = datetime.date.today()
+    if "昨天" in text:
+        return str(today - datetime.timedelta(days=1))
+    if "明天" in text:
+        return str(today + datetime.timedelta(days=1))
+    m = re.search(r'(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})', text)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = re.search(r'(\d{1,2})\s*月\s*(\d{1,2})', text)
+        if m:
+            y, mo, d = today.year, int(m.group(1)), int(m.group(2))
+        else:
+            m = re.search(r'(\d{1,2})\s*[号日]', text)
+            if m:
+                y, mo, d = today.year, today.month, int(m.group(1))
+            else:
+                return None
+    try:
+        return str(datetime.date(y, mo, d))
+    except ValueError:
+        return None
+
 def extract_bill_logic(text: str):
-    input_ids = [tokenizer.token_to_id(t) or tokenizer.token_to_id("[UNK]") for t in text]
+    # 先剥离日期短语再推理，避免 NER 把日期里的数字误标为金额
+    date_str = extract_date(text)
+    text_for_ner = DATE_RE.sub('', text)
+
+    input_ids = [tokenizer.token_to_id(t) or tokenizer.token_to_id("[UNK]") for t in text_for_ner]
     x = torch.tensor([input_ids]).to(device)
     mask = torch.ones_like(x, dtype=torch.bool).to(device)
-    
+
     with torch.no_grad():
         logits = ner_model(x, mask)
         preds = torch.argmax(logits, dim=-1)[0].cpu().numpy()
-        
+
     amount, action = "", ""
-    for char, pred_id in zip(text, preds):
+    for char, pred_id in zip(text_for_ner, preds):
         label = id2label.get(pred_id, "O")
-        if "AMOUNT" in label: 
+        if "AMOUNT" in label:
             amount += char
-        elif "ACTION" in label: 
+        elif "ACTION" in label:
             action += char
-            
+
     # 金额清洗（只保留数字和小数点）
     amount_clean = re.sub(r'[^\d.]', '', amount)
+
+    # 兜底：模型没标出金额时，用正则找 "50块" / "35元" / "¥35"
+    if not amount_clean:
+        m = re.search(r'(\d+(?:\.\d+)?)\s*[块元]', text_for_ner) \
+            or re.search(r'[¥￥](\d+(?:\.\d+)?)', text_for_ner)
+        if m:
+            amount_clean = m.group(1)
     
     # 商业后处理兜底（规则映射）
     category = "其他"
@@ -160,9 +204,10 @@ def extract_bill_logic(text: str):
         elif "房租" in text: category = "居住"
         
     return {
-        "amount": amount_clean, 
-        "action": action, 
-        "category": category
+        "amount": amount_clean,
+        "action": action,
+        "category": category,
+        "date": date_str
     }
 
 # ==========================================
