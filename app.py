@@ -277,19 +277,23 @@ def api_send_code(data: EmailCodeInput):
         return {"code": 429, "msg": "发送太频繁，请稍后再试"}
 
     code = f"{random.randint(0, 999999):06d}"
-    try:
-        send_code_email(email, code)
-    except smtplib.SMTPAuthenticationError:
-        return {"code": 500, "msg": "发件邮箱认证失败，请检查 SMTP_PASS 是否为QQ邮箱SMTP授权码（非QQ登录密码）"}
-    except Exception as e:
-        return {"code": 500, "msg": f"邮件发送失败：{e}"}
 
+    # 先写入限流占位，防止发送耗时期间并发重复发信（发送失败再回滚允许重试）
     code_store[email] = {
         "code": code,
         "expiry": now + CODE_TTL,
         "last_send": now,
         "attempts": 0,
     }
+    try:
+        send_code_email(email, code)
+    except smtplib.SMTPAuthenticationError:
+        code_store.pop(email, None)
+        return {"code": 500, "msg": "发件邮箱认证失败，请检查 SMTP_PASS 是否为QQ邮箱SMTP授权码（非QQ登录密码）"}
+    except Exception as e:
+        code_store.pop(email, None)
+        return {"code": 500, "msg": f"邮件发送失败：{e}"}
+
     return {"code": 200, "msg": "验证码已发送"}
 
 
