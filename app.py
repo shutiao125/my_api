@@ -195,20 +195,32 @@ if __name__ == "__main__":
 
 
 # ==========================================
-# 6. 邮箱验证码服务（Hotmail SMTP 真实发信）
+# 6. 邮箱验证码服务
+# 优先使用 Brevo HTTP API（Render 免费实例封禁 SMTP 出站端口，
+# HTTP API 走 443 端口不受限）；未配置 BREVO_API_KEY 时回退 SMTP
 # ==========================================
+import json
 import os
 import random
 import smtplib
 import time
+import urllib.request
 from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.qq.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-SMTP_USER = os.environ.get("SMTP_USER", "2498383161@qq.com")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")  # QQ邮箱SMTP授权码（设置-账户-开启SMTP服务后生成），配置在 Render 环境变量，不要写死在代码里
+SMTP_USER = os.environ.get("SMTP_USER", "2498383161@qq.com")  # 发件邮箱
+SMTP_PASS = os.environ.get("SMTP_PASS", "")  # QQ邮箱SMTP授权码（仅 SMTP 回退方式使用）
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")  # Brevo API Key（不支持免费邮箱发件人，已弃用）
+SENDER_NAME = os.environ.get("SENDER_NAME", "记账本")
+
+# EmailJS（推荐）：在 emailjs.com 绑定 QQ 邮箱 SMTP，通过其 443 端口 HTTP 接口发信
+EMAILJS_SERVICE_ID = os.environ.get("EMAILJS_SERVICE_ID", "")
+EMAILJS_TEMPLATE_ID = os.environ.get("EMAILJS_TEMPLATE_ID", "")
+EMAILJS_PUBLIC_KEY = os.environ.get("EMAILJS_PUBLIC_KEY", "")
+EMAILJS_PRIVATE_KEY = os.environ.get("EMAILJS_PRIVATE_KEY", "")  # REST 发信必需的私钥
 
 CODE_TTL = 5 * 60           # 验证码有效期 5 分钟
 CODE_RESEND_INTERVAL = 60   # 同一邮箱 60 秒内只能发一次
@@ -227,13 +239,61 @@ def send_code_email(to_email: str, code: str):
       <p style="color:#9ca3af;font-size:12px;">如果这不是你的操作，请忽略本邮件。</p>
     </div>
     """
+
+    # 方式一：EmailJS HTTP API（443 端口，云平台不受限，推荐；发件人 = 绑定的 QQ 邮箱）
+    if EMAILJS_SERVICE_ID and EMAILJS_TEMPLATE_ID and EMAILJS_PUBLIC_KEY:
+        payload = {
+            "service_id": EMAILJS_SERVICE_ID,
+            "template_id": EMAILJS_TEMPLATE_ID,
+            "user_id": EMAILJS_PUBLIC_KEY,
+            "accessToken": EMAILJS_PRIVATE_KEY,  # REST 调用需要私钥
+            "template_params": {
+                "to_email": to_email,
+                "code": code,
+                "subject": "记账本 · 邮箱验证码",
+            },
+        }
+        req = urllib.request.Request(
+            "https://api.emailjs.com/api/v1.0/email/send",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"accept": "application/json", "content-type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "ignore")
+            if resp.status != 200:
+                raise RuntimeError(f"EmailJS 返回 {resp.status}: {body}")
+        return
+
+    # 方式二：Brevo HTTP API（要求发件人域名通过验证，免费邮箱不可用）
+    if BREVO_API_KEY:
+        payload = {
+            "sender": {"name": SENDER_NAME, "email": SMTP_USER},
+            "to": [{"email": to_email}],
+            "subject": "记账本 · 邮箱验证码",
+            "htmlContent": html,
+        }
+        req = urllib.request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+                "api-key": BREVO_API_KEY,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status not in (200, 201):
+                raise RuntimeError(f"Brevo API 返回 {resp.status}")
+        return
+
+    # 方式二：SMTP 直发（需要所在平台放行 587/465 出站端口）
     msg = MIMEText(html, "html", "utf-8")
     msg["Subject"] = Header("记账本 · 邮箱验证码", "utf-8")
-    msg["From"] = formataddr(("记账本", SMTP_USER))
+    msg["From"] = formataddr((SENDER_NAME, SMTP_USER))
     msg["To"] = to_email
 
-    # 云平台（如 Render 免费实例）可能封禁部分 SMTP 出站端口，
-    # 依次尝试 587(STARTTLS) 与 465(SSL)，哪个通用哪个
     attempts = [(587, "starttls"), (SMTP_PORT, "ssl")]
     errors = []
     for port, mode in attempts:
@@ -268,8 +328,8 @@ def api_send_code(data: EmailCodeInput):
     email = data.email.strip().lower()
     if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
         return {"code": 400, "msg": "邮箱格式不正确"}
-    if not SMTP_PASS:
-        return {"code": 500, "msg": "邮件服务未配置（缺少 SMTP_PASS 环境变量）"}
+    if not (BREVO_API_KEY or SMTP_PASS):
+        return {"code": 500, "msg": "邮件服务未配置（缺少 BREVO_API_KEY 环境变量）"}
 
     now = time.time()
     rec = code_store.get(email)
