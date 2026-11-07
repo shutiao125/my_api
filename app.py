@@ -192,3 +192,115 @@ def api_extract(data: UserInput):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# ==========================================
+# 6. 邮箱验证码服务（Hotmail SMTP 真实发信）
+# ==========================================
+import os
+import random
+import smtplib
+import time
+from email.header import Header
+from email.mime.text import MIMEText
+from email.utils import formataddr
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.qq.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_USER = os.environ.get("SMTP_USER", "2498383161@qq.com")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")  # QQ邮箱SMTP授权码（设置-账户-开启SMTP服务后生成），配置在 Render 环境变量，不要写死在代码里
+
+CODE_TTL = 5 * 60           # 验证码有效期 5 分钟
+CODE_RESEND_INTERVAL = 60   # 同一邮箱 60 秒内只能发一次
+CODE_MAX_ATTEMPTS = 5       # 最多可错 5 次
+
+code_store = {}  # 内存存储 {email: {code, expiry, last_send, attempts}}
+
+
+def send_code_email(to_email: str, code: str):
+    html = f"""
+    <div style="max-width:480px;margin:0 auto;font-family:Arial,'Microsoft YaHei',sans-serif;
+                padding:28px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;">
+      <h2 style="color:#1f2937;margin:0 0 8px;">记账本 · 邮箱验证码</h2>
+      <p style="color:#6b7280;font-size:14px;">你正在注册账号，本次验证码 <b>5 分钟内有效</b>：</p>
+      <p style="font-size:34px;font-weight:bold;letter-spacing:10px;color:#2b6bf3;margin:18px 0;">{code}</p>
+      <p style="color:#9ca3af;font-size:12px;">如果这不是你的操作，请忽略本邮件。</p>
+    </div>
+    """
+    msg = MIMEText(html, "html", "utf-8")
+    msg["Subject"] = Header("记账本 · 邮箱验证码", "utf-8")
+    msg["From"] = formataddr(("记账本", SMTP_USER))
+    msg["To"] = to_email
+
+    if SMTP_PORT == 465:
+        # QQ邮箱等使用 SSL 直连
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, [to_email], msg.as_string())
+    else:
+        # 其他邮箱使用 STARTTLS
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, [to_email], msg.as_string())
+
+
+class EmailCodeInput(BaseModel):
+    email: str
+    code: str = ""
+
+
+@app.post("/api/send-code")
+def api_send_code(data: EmailCodeInput):
+    """向指定邮箱发送 6 位验证码"""
+    email = data.email.strip().lower()
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return {"code": 400, "msg": "邮箱格式不正确"}
+    if not SMTP_PASS:
+        return {"code": 500, "msg": "邮件服务未配置（缺少 SMTP_PASS 环境变量）"}
+
+    now = time.time()
+    rec = code_store.get(email)
+    if rec and now - rec["last_send"] < CODE_RESEND_INTERVAL:
+        return {"code": 429, "msg": "发送太频繁，请稍后再试"}
+
+    code = f"{random.randint(0, 999999):06d}"
+    try:
+        send_code_email(email, code)
+    except smtplib.SMTPAuthenticationError:
+        return {"code": 500, "msg": "发件邮箱认证失败，请检查 SMTP_PASS 是否为QQ邮箱SMTP授权码（非QQ登录密码）"}
+    except Exception as e:
+        return {"code": 500, "msg": f"邮件发送失败：{e}"}
+
+    code_store[email] = {
+        "code": code,
+        "expiry": now + CODE_TTL,
+        "last_send": now,
+        "attempts": 0,
+    }
+    return {"code": 200, "msg": "验证码已发送"}
+
+
+@app.post("/api/verify-code")
+def api_verify_code(data: EmailCodeInput):
+    """校验邮箱验证码，验证通过后该码立即作废"""
+    email = data.email.strip().lower()
+    code = data.code.strip()
+    rec = code_store.get(email)
+    if not rec:
+        return {"code": 400, "msg": "请先获取验证码"}
+    if time.time() > rec["expiry"]:
+        code_store.pop(email, None)
+        return {"code": 400, "msg": "验证码已过期，请重新获取"}
+
+    rec["attempts"] += 1
+    if rec["attempts"] > CODE_MAX_ATTEMPTS:
+        code_store.pop(email, None)
+        return {"code": 429, "msg": "错误次数过多，请重新获取验证码"}
+    if code != rec["code"]:
+        return {"code": 400, "msg": "验证码错误"}
+
+    code_store.pop(email, None)
+    return {"code": 200, "msg": "验证通过"}
