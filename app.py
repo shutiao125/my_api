@@ -232,19 +232,29 @@ def send_code_email(to_email: str, code: str):
     msg["From"] = formataddr(("记账本", SMTP_USER))
     msg["To"] = to_email
 
-    if SMTP_PORT == 465:
-        # QQ邮箱等使用 SSL 直连
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, [to_email], msg.as_string())
-    else:
-        # 其他邮箱使用 STARTTLS
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, [to_email], msg.as_string())
+    # 云平台（如 Render 免费实例）可能封禁部分 SMTP 出站端口，
+    # 依次尝试 587(STARTTLS) 与 465(SSL)，哪个通用哪个
+    attempts = [(587, "starttls"), (SMTP_PORT, "ssl")]
+    errors = []
+    for port, mode in attempts:
+        try:
+            if mode == "ssl":
+                with smtplib.SMTP_SSL(SMTP_HOST, port, timeout=20) as server:
+                    server.login(SMTP_USER, SMTP_PASS)
+                    server.sendmail(SMTP_USER, [to_email], msg.as_string())
+            else:
+                with smtplib.SMTP(SMTP_HOST, port, timeout=20) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(SMTP_USER, SMTP_PASS)
+                    server.sendmail(SMTP_USER, [to_email], msg.as_string())
+            return  # 发送成功
+        except smtplib.SMTPAuthenticationError:
+            raise  # 授权码错误换端口也没用，直接抛出让上层返回明确提示
+        except Exception as e:
+            errors.append(f"{port}端口({mode}): {e}")
+    raise RuntimeError("; ".join(errors))
 
 
 class EmailCodeInput(BaseModel):
