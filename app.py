@@ -92,10 +92,10 @@ class MiniEncoderForNER(nn.Module):
 app = FastAPI(title="记账模型 API", description="用于提取账单金额与分类")
 
 # 允许所有来源的跨域请求（App 端请求必备）
+# 服务不依赖 Cookie 会话，关闭 credentials 后与 allow_origins=["*"] 组合才符合 CORS 规范
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -256,7 +256,7 @@ from email.utils import formataddr
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.qq.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-SMTP_USER = os.environ.get("SMTP_USER", "2498383161@qq.com")  # 发件邮箱
+SMTP_USER = os.environ.get("SMTP_USER", "")  # 发件邮箱（Brevo 发件人 / SMTP 登录账号，通过环境变量注入，勿硬编码）
 SMTP_PASS = os.environ.get("SMTP_PASS", "")  # QQ邮箱SMTP授权码（仅 SMTP 回退方式使用）
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")  # Brevo API Key（不支持免费邮箱发件人，已弃用）
 SENDER_NAME = os.environ.get("SENDER_NAME", "记账本")
@@ -271,7 +271,7 @@ CODE_TTL = 5 * 60           # 验证码有效期 5 分钟
 CODE_RESEND_INTERVAL = 60   # 同一邮箱 60 秒内只能发一次
 CODE_MAX_ATTEMPTS = 5       # 最多可错 5 次
 
-code_store = {}  # 内存存储 {email: {code, expiry, last_send, attempts}}
+code_store = {}  # 内存存储 {email: {code, expiry, last_send, attempts}}，验证码 5 分钟过期、即用即废
 
 
 def send_code_email(to_email: str, code: str):
