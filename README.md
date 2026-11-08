@@ -40,7 +40,7 @@
 - 先用正则剥离日期短语再送模型，避免「25号」里的数字被误标为金额
 - 模型漏标金额时，按「50块 / ¥35」等模式正则兜底
 - 分类由 ACTION 关键词规则映射（餐饮 / 购物 / 交通 / 居住 / 医疗 / 娱乐），再从原文二次兜底
-- CPU 单线程推理，规避 Render 免费容器多线程死锁
+- CPU 单线程推理，规避容器环境多线程死锁
 
 ## 训练过程
 
@@ -72,11 +72,21 @@ docker run -p 8000:8000 my-api
 
 ### Render（免服务器）
 
-仓库自带 Dockerfile（CPU 版 PyTorch，避免拉取 CUDA 依赖），Render 新建 Web Service 连接本仓库即可自动部署；免费实例 15 分钟无流量会休眠，可用定时任务周期请求 `/health` 保活。
+仓库自带 Dockerfile（CPU 版 PyTorch，避免拉取 CUDA 依赖），Render 新建 Web Service 连接本仓库即可自动部署；`/health` 接口用于定时保活。
 
 ## 调用
 
 核心接口只有一个：`POST /api/extract`（模型推理入口）。
+
+**在线服务地址（Render）**：`https://my-api-tdow.onrender.com`
+
+```bash
+curl -X POST https://my-api-tdow.onrender.com/api/extract \
+  -H "Content-Type: application/json" \
+  -d '{"text": "昨天午饭吃了35块"}'
+```
+
+本地调用把地址换成 `http://localhost:8000` 即可：
 
 ```bash
 curl -X POST http://localhost:8000/api/extract \
@@ -93,13 +103,3 @@ curl -X POST http://localhost:8000/api/extract \
   "data": {"amount": "35", "action": "午饭吃", "category": "餐饮", "date": "2026-11-08"}
 }
 ```
-
-更多调用示例：
-
-| 输入文本 | 返回 `data` |
-|---|---|
-| `今天打车上班花了23块` | `{"amount":"23","action":"打车上班","category":"交通","date":"2026-11-09"}` |
-| `10月25号买了一件外套299元` | `{"amount":"299","action":"买了一件外套","category":"购物","date":"2026-10-25"}` |
-| `昨天看电影花了80块` | `{"amount":"80","action":"看电影","category":"娱乐","date":"2026-11-08"}` |
-
-> 示例中的 `date` 以 2026-11-09 为「今天」。日期支持「10月25号 / 2026-10-25 / 昨天 / 明天」，识别不出返回 `null`（前端兜底今天）。
