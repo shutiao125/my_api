@@ -86,6 +86,24 @@ class MiniEncoderForNER(nn.Module):
         x = self.encoder.ln_f(x)
         return self.ner_head(x)
 
+class MiniEncoderForCLS(nn.Module):
+    """句级分类头：masked mean-pooling + Linear（与 train_classifier.py 结构一致）"""
+    def __init__(self, base_encoder, num_classes):
+        super().__init__()
+        self.encoder = base_encoder
+        self.cls_head = nn.Linear(384, num_classes)
+
+    def forward(self, idx, mask=None):
+        B, T = idx.size()
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        h = self.encoder.wte(idx) + self.encoder.wpe(pos)
+        for block in self.encoder.blocks:
+            h = block(h, mask)
+        h = self.encoder.ln_f(h)
+        w = mask.unsqueeze(-1).float()
+        pooled = (h * w).sum(1) / w.sum(1).clamp(min=1e-6)
+        return self.cls_head(pooled)
+
 # ==========================================
 # 2. 初始化 FastAPI 与 跨域配置
 # ==========================================
@@ -116,6 +134,27 @@ try:
     ner_model = MiniEncoderForNER(base_encoder).to(device)
     ner_model.load_state_dict(torch.load("my_ner_model_final.pt", map_location=device))
     ner_model.eval()
+
+    # 句级分类模型：独立骨干实例（与 NER 的微调权重互不覆盖）
+    cls_ckpt = torch.load("cls_classifier.pt", map_location=device)
+    cls_labels = cls_ckpt.get("labels", ["交通", "其他", "医疗", "娱乐", "居住", "购物", "餐饮"])
+    cls_backbone = MiniEncoderForMLM(vocab_size=REAL_VOCAB_SIZE, block_size=256).to(device)
+    cls_model = MiniEncoderForCLS(cls_backbone, num_classes=len(cls_labels)).to(device)
+    # checkpoint 以 fp16 存储（减半体积），加载时转回 fp32
+    cls_model.load_state_dict({k: v.float() if v.dtype.is_floating_point else v
+                               for k, v in cls_ckpt["model"].items()})
+    cls_model.eval()
+
+    def predict_category(text: str):
+        """分类模型推理：返回类别；置信度不足时返回 None，由关键词规则兜底"""
+        ids = tokenizer.encode(text).ids[:32]
+        idx = torch.tensor([ids], device=device)
+        mask = torch.ones_like(idx, dtype=torch.bool)
+        with torch.no_grad():
+            probs = torch.softmax(cls_model(idx, mask), dim=-1)[0]
+        conf, i = probs.max(0)
+        return cls_labels[i.item()] if conf.item() >= 0.5 else None
+
     print("✅ 模型加载成功！")
 except Exception as e:
     print(f"❌ 模型加载失败: {e}")
@@ -204,7 +243,7 @@ def extract_bill_logic(text: str):
         if m:
             amount_clean = m.group(1)
     
-    # 分类规则映射：先看模型抽出的动作，动作落空时再扫原文二次兜底
+    # 分类：句级分类模型优先（置信度>=0.5），低置信度回退关键词规则
     def map_category(s: str):
         if any(k in s for k in ["影", "游", "玩", "戏", "KTV", "旅"]): return "娱乐"
         if any(k in s for k in ["病", "药", "医", "检", "感"]): return "医疗"
@@ -214,7 +253,8 @@ def extract_bill_logic(text: str):
         if any(k in s for k in ["车", "铁", "公交", "油", "地铁"]): return "交通"
         return None
 
-    category = map_category(action) or map_category(text_for_ner) or "其他"
+    category = predict_category(text_for_ner) \
+        or map_category(action) or map_category(text_for_ner) or "其他"
         
     return {
         "amount": amount_clean,
