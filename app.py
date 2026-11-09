@@ -134,8 +134,10 @@ DATE_RE = re.compile(
 def extract_date(text: str):
     """从原文解析记账日期，返回 YYYY-MM-DD；无法识别时返回 None（前端兜底今天）"""
     today = datetime.date.today()
-    if "昨天" in text:
+    if "昨天" in text or "昨晚" in text:
         return str(today - datetime.timedelta(days=1))
+    if "今晚" in text:
+        return str(today)
     if "明天" in text:
         return str(today + datetime.timedelta(days=1))
     m = re.search(r'(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})', text)
@@ -180,6 +182,21 @@ def extract_bill_logic(text: str):
     # 金额清洗（只保留数字和小数点）
     amount_clean = re.sub(r'[^\d.]', '', amount)
 
+    # span 内混入计数单位（如「2张90」）时，取最后一组数字（价格总在量词后）
+    groups = re.findall(r'\d+(?:\.\d+)?', amount)
+    if len(groups) > 1:
+        amount_clean = groups[-1]
+
+    # 口语小数「3块5」→ 3.5（模型 span 无法表达，规则补齐）
+    m_decimal = re.search(r'(\d+)块(\d{1,2})(?!\d)', text_for_ner)
+    if m_decimal:
+        amount_clean = f"{m_decimal.group(1)}.{m_decimal.group(2)}"
+
+    # 「数量+量词+单价」结构（如「2张90」）取量词后的价格
+    m_qty = re.search(r'\d+(?:\.\d+)?[张个只件条斤袋包瓶支](\d+(?:\.\d+)?)', text_for_ner)
+    if m_qty:
+        amount_clean = m_qty.group(1)
+
     # 兜底：模型没标出金额时，用正则找 "50块" / "35元" / "¥35"
     if not amount_clean:
         m = re.search(r'(\d+(?:\.\d+)?)\s*[块元]', text_for_ner) \
@@ -187,21 +204,17 @@ def extract_bill_logic(text: str):
         if m:
             amount_clean = m.group(1)
     
-    # 商业后处理兜底（规则映射）
-    category = "其他"
-    if any(k in action for k in ["影", "游", "玩", "戏", "KTV", "旅"]): category = "娱乐"
-    elif any(k in action for k in ["病", "药", "医", "检"]): category = "医疗"
-    elif any(k in action for k in ["房", "水", "物", "家", "空", "租"]): category = "居住"
-    elif any(k in action for k in ["吃", "喝", "餐", "菜", "堡", "茶", "啡", "麦当劳", "星巴克"]): category = "餐饮"
-    elif any(k in action for k in ["衣", "鞋", "买", "键", "耳", "妆", "淘宝", "礼物"]): category = "购物"
-    elif any(k in action for k in ["车", "铁", "交", "油", "地铁"]): category = "交通"
-    
-    # 如果模型没抽出有效词，强行在原文里捞
-    if category == "其他":
-        if "衣服" in text or "鞋" in text or "礼物" in text: category = "购物"
-        elif "打车" in text or "地铁" in text: category = "交通"
-        elif "奶茶" in text or "星巴克" in text: category = "餐饮"
-        elif "房租" in text: category = "居住"
+    # 分类规则映射：先看模型抽出的动作，动作落空时再扫原文二次兜底
+    def map_category(s: str):
+        if any(k in s for k in ["影", "游", "玩", "戏", "KTV", "旅"]): return "娱乐"
+        if any(k in s for k in ["病", "药", "医", "检", "感"]): return "医疗"
+        if any(k in s for k in ["房", "水费", "水电", "电费", "物业", "家", "空", "租"]): return "居住"
+        if any(k in s for k in ["吃", "喝", "餐", "菜", "堡", "茶", "啡", "饭", "麦当劳", "星巴克"]): return "餐饮"
+        if any(k in s for k in ["衣", "鞋", "买", "键", "耳", "妆", "淘宝", "礼物"]): return "购物"
+        if any(k in s for k in ["车", "铁", "公交", "油", "地铁"]): return "交通"
+        return None
+
+    category = map_category(action) or map_category(text_for_ner) or "其他"
         
     return {
         "amount": amount_clean,
