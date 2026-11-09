@@ -1,4 +1,4 @@
-# my_api · 自研轻量中文大模型（记账 NER）
+# 自研轻量中文大模型（记账 NER）
 
 一个**从零开始**的中文大模型全流程项目：自训练分词器 → MLM 预训练 → NER 微调 → FastAPI 服务化 → Docker/Render 部署。全程不依赖任何预训练模型（无 BERT/ERNIE）与第三方推理 API。
 
@@ -26,7 +26,7 @@
 
 ## 模型解释：MiniEncoder
 
-结构在 [app.py](app.py) 中手写实现，未借助 transformers 等库：
+结构在 [app.py](app.py) 中实现，未借助 transformers 等库：
 
 | 组件 | 说明 |
 |---|---|
@@ -70,7 +70,7 @@ docker build -t my-api .
 docker run -p 8000:8000 my-api
 ```
 
-### Render（免服务器）
+### Render
 
 仓库自带 Dockerfile（CPU 版 PyTorch，避免拉取 CUDA 依赖），Render 新建 Web Service 连接本仓库即可自动部署；`/health` 接口用于定时保活。
 
