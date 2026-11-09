@@ -2,7 +2,7 @@
 
 一个**从零开始**的中文大模型全流程项目：自训练分词器 → MLM 预训练 → NER 微调 → FastAPI 服务化 → Docker/Render 部署。全程不依赖任何预训练模型（无 BERT/ERNIE）与第三方推理 API。
 
-模型能力：把「昨天打车花了35块」这类自然语言解析成结构化账单（金额 / 动作 / 分类 / 日期），为「快记账！」App 提供智能记账能力（客户端见 [ios 仓库](https://github.com/shutiao125/ios)）。
+模型能力：把「昨天打车花了35块」这类自然语言解析成结构化账单（金额 / 动作 / 分类 / 日期），为「快记账！」App 提供智能记账能力（客户端见 [kuaijizhang 仓库](https://github.com/shutiao125/kuaijizhang)）。
 
 ## 仓库内容
 
